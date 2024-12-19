@@ -1,136 +1,115 @@
 import json
-import re
-import math
-import matplotlib.pyplot as plt
-from collections import defaultdict
+import pandas as pd
 from sklearn.model_selection import train_test_split
+from collections import defaultdict
+import math
+from sklearn.svm import LinearSVC
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
-from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import classification_report, accuracy_score
 
-# 1. 데이터 로드 및 전처리
-with open('News_Category_Dataset_v3.json', 'r', encoding='utf-8') as f:
-    data = [json.loads(line) for line in f]
+# Load the dataset
+data = []
+with open("News_Category_Dataset_v3.json", "r") as file:
+    for line in file:
+        data.append(json.loads(line.strip()))
 
-def preprocess(text):
-    text = text.lower()
-    text = re.sub(r'[^a-zA-Z\s]', '', text)
-    tokens = text.split()
-    stopwords = {'the', 'is', 'and', 'in', 'to', 'a'}
-    tokens = [word for word in tokens if word not in stopwords]
-    return tokens
+# Convert JSON to DataFrame
+df = pd.DataFrame(data)
 
-texts = [preprocess(item['short_description']) for item in data]
-labels = [item['category'] for item in data]
+# Inspect the dataset
+print("Dataset Head:")
+print(df.head())
 
-vocab = set(word for text in texts for word in text)
-word2idx = {word: idx for idx, word in enumerate(vocab)}
+# Ensure necessary columns exist
+if not all(col in df.columns for col in ["category", "headline"]):
+    raise ValueError("Dataset must contain 'category' and 'headline' columns.")
 
-def vectorize(text):
-    vector = [0] * len(vocab)
-    for word in text:
-        if word in word2idx:
-            vector[word2idx[word]] += 1
-    return vector
+# Data Preprocessing
+df = df.dropna(subset=["category", "headline"])
+df["headline"] = df["headline"].str.lower()
 
-X = [vectorize(text) for text in texts]
-y = labels
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(
+    df["headline"], df["category"], test_size=0.2, random_state=42
+)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# TF-IDF Vectorization
+vectorizer = TfidfVectorizer(max_features=5000)
+X_train_tfidf = vectorizer.fit_transform(X_train)
+X_test_tfidf = vectorizer.transform(X_test)
 
-# 2. Naive Bayes 구현
-class NaiveBayes:
+# Naive Bayes Implementation
+class NaiveBayesClassifier:
     def __init__(self):
-        self.classes = set()
-        self.class_word_counts = defaultdict(lambda: defaultdict(int))
-        self.class_counts = defaultdict(int)
+        self.class_probs = defaultdict(float)
+        self.word_probs = defaultdict(lambda: defaultdict(float))
         self.vocab = set()
-        self.total_words = defaultdict(int)
-    
+
     def train(self, X, y):
-        for features, label in zip(X, y):
-            self.classes.add(label)
-            self.class_counts[label] += 1
-            for idx, count in enumerate(features):
-                if count > 0:
-                    self.class_word_counts[label][idx] += count
-                    self.total_words[label] += count
-                    self.vocab.add(idx)
-        self.total_docs = len(y)
-    
+        class_counts = defaultdict(int)
+        word_counts = defaultdict(lambda: defaultdict(int))
+
+        for text, label in zip(X, y):
+            class_counts[label] += 1
+            for word in text.split():
+                self.vocab.add(word)
+                word_counts[label][word] += 1
+
+        total_docs = len(X)
+        self.class_probs = {cls: count / total_docs for cls, count in class_counts.items()}
+
+        for cls in class_counts:
+            total_words = sum(word_counts[cls].values())
+            for word in self.vocab:
+                self.word_probs[cls][word] = (
+                    (word_counts[cls][word] + 1) / (total_words + len(self.vocab))
+                )
+
     def predict(self, X):
         predictions = []
-        for features in X:
+        for text in X:
             class_scores = {}
-            for cls in self.classes:
-                log_prob = math.log(self.class_counts[cls] / self.total_docs)
-                for idx, count in enumerate(features):
-                    if count > 0:
-                        word_prob = (self.class_word_counts[cls].get(idx, 0) + 1) / (self.total_words[cls] + len(self.vocab))
-                        log_prob += count * math.log(word_prob)
-                class_scores[cls] = log_prob
-            predicted_class = max(class_scores, key=class_scores.get)
-            predictions.append(predicted_class)
+            for cls in self.class_probs:
+                class_scores[cls] = math.log(self.class_probs[cls])
+                for word in text.split():
+                    if word in self.vocab:
+                        class_scores[cls] += math.log(self.word_probs[cls][word])
+
+            predictions.append(max(class_scores, key=class_scores.get))
         return predictions
 
-nb = NaiveBayes()
-nb.train(X_train, y_train)
-nb_pred = nb.predict(X_test)
+# Initialize Naive Bayes classifier
+nb_classifier = NaiveBayesClassifier()
 
-# 3. 추가 알고리즘 구현
-# 결정 트리
-dt = DecisionTreeClassifier()
-dt.fit(X_train, y_train)
-dt_pred = dt.predict(X_test)
-
-# SVM
-svm = SVC()
-svm.fit(X_train, y_train)
-svm_pred = svm.predict(X_test)
-
-# 신경망
-nn = MLPClassifier(hidden_layer_sizes=(100,), max_iter=300)
-nn.fit(X_train, y_train)
-nn_pred = nn.predict(X_test)
-
-# 4. 성능 평가
-def evaluate(y_true, y_pred, model_name):
-    accuracy = accuracy_score(y_true, y_pred)
-    precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted')
-    print(f"{model_name} - Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}")
-    return accuracy, precision, recall, f1
-
-models = {
-    'Naive Bayes': nb_pred,
-    'Decision Tree': dt_pred,
-    'SVM': svm_pred,
-    'Neural Network': nn_pred
+# Initialize classifiers
+classifiers = {
+    'Naive Bayes': nb_classifier,
+    'SVM': LinearSVC(random_state=42),
+    'Decision Tree': DecisionTreeClassifier(random_state=42),
+    'Logistic Regression': LogisticRegression(random_state=42, max_iter=1000)
 }
 
+# Train and evaluate each classifier
 results = {}
-for name, pred in models.items():
-    results[name] = evaluate(y_test, pred, name)
-
-# 시각화
-labels = list(results.keys())
-accuracy = [results[name][0] for name in labels]
-precision = [results[name][1] for name in labels]
-recall = [results[name][2] for name in labels]
-f1 = [results[name][3] for name in labels]
-
-x = range(len(labels))
-width = 0.2
-
-plt.figure(figsize=(12, 8))
-plt.bar(x, accuracy, width, label='Accuracy')
-plt.bar([p + width for p in x], precision, width, label='Precision')
-plt.bar([p + width*2 for p in x], recall, width, label='Recall')
-plt.bar([p + width*3 for p in x], f1, width, label='F1-Score')
-
-plt.xlabel('Models')
-plt.ylabel('Scores')
-plt.title('Model Performance Comparison')
-plt.xticks([p + width*1.5 for p in x], labels)
-plt.legend()
-plt.show() 
+for name, clf in classifiers.items():
+    if name == 'Naive Bayes':
+        clf.train(X_train, y_train)
+        y_pred = clf.predict(X_test)
+    else:
+        clf.fit(X_train_tfidf, y_train)
+        y_pred = clf.predict(X_test_tfidf)
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred)
+    
+    results[name] = {
+        'accuracy': accuracy,
+        'report': report
+    }
+    
+    print(f"\n{name} Results:")
+    print(f"Accuracy: {accuracy * 100:.2f}%")
+    print("Detailed Report:")
+    print(report)
